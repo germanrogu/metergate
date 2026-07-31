@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../../src/app.module';
+import { getCurrentSpendUsdMicros } from '../../src/budgets/budget-guard';
 import { getPool } from '../../src/db/pool';
 import { runWithTenantContext } from '../../src/middleware/tenant-context';
 import { storeProviderCredential } from '../../src/provider-credentials/provider-credentials.repository';
@@ -238,5 +239,58 @@ describe('gateway proxy (integration)', () => {
       [limited.tenantId, 'rate-limit-plan-test'],
     );
     expect(rows).toHaveLength(1);
+  });
+
+  it('rejects a call that would exceed the monthly budget', async () => {
+    // A budget of 100 micros is smaller than even the reservation for
+    // a single short call, so the very first request is guaranteed to
+    // be rejected — no need to burn through a real budget first.
+    const brokeTenant = await seedTenant({ monthlyBudgetUsdMicros: 100 });
+    await runWithTenantContext(brokeTenant.tenantId, async () => {
+      await storeProviderCredential('openai', 'sk-test-not-a-real-key');
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${brokeTenant.plaintextKey}`)
+      .send({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'hello' }],
+        feature: 'budget-test',
+      });
+
+    expect(response.status).toBe(402);
+
+    const rows = await queryAsMigrator<UsageEventRow>(
+      "SELECT status FROM usage_events WHERE tenant_id = $1 AND feature = $2 AND status = 'blocked'",
+      [brokeTenant.tenantId, 'budget-test'],
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it('reconciles the budget reservation down to the actual cost after a successful call', async () => {
+    const tenant = await seedTenant({ monthlyBudgetUsdMicros: 10_000_000 });
+    await runWithTenantContext(tenant.tenantId, async () => {
+      await storeProviderCredential('openai', 'sk-test-not-a-real-key');
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${tenant.plaintextKey}`)
+      .send({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'hi' }],
+        feature: 'budget-reconcile-test',
+      });
+
+    expect(response.status).toBe(200);
+
+    const spend = await getCurrentSpendUsdMicros(tenant.tenantId);
+    // The real cost (a handful of tokens) is far smaller than the
+    // reservation (sized for the 512-token default estimate) — proving
+    // the reservation was trued up rather than left at the estimate.
+    expect(spend).toBe(response.body.costUsdMicros);
   });
 });
