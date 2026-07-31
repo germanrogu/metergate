@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: postgres://metergate_app:metergate_app@localhost:5432/metergate
+  MIGRATIONS_DATABASE_URL: postgres://metergate_migrator:metergate_migrator@localhost:5432/metergate
+  REDIS_URL: redis://localhost:6379
+  LLM_MODE: mock
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: metergate_migrator
+          POSTGRES_PASSWORD: metergate_migrator
+          POSTGRES_DB: metergate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U metergate_migrator"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run test
+
+      - name: Run api integration tests
+        run: npm run test:integration --workspace=@metergate/api
+
+      - run: npm run build
