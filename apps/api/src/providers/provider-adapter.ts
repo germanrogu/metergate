@@ -8,7 +8,7 @@ export interface ProviderMessage {
 export interface ProviderRequest {
   model: string;
   messages: ProviderMessage[];
-  maxTokens?: number;
+  maxTokens?: number | undefined;
 }
 
 export interface ProviderChunk {
