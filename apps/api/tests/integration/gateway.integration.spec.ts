@@ -170,4 +170,38 @@ describe('gateway proxy (integration)', () => {
     );
     expect(rows).toHaveLength(1);
   });
+
+  it('opens the circuit after repeated failures and fails fast without calling the provider again', async () => {
+    // A separate model (gpt-4o, not gpt-4o-mini) keeps this test's
+    // circuit-breaker state isolated from the other tests in this file.
+    const failingPayload = {
+      provider: 'openai',
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'trip the breaker' }],
+      feature: 'circuit-breaker-test',
+      mockScenario: 'malformed',
+    };
+
+    // Default threshold is 5 consecutive failures.
+    for (let i = 0; i < 5; i += 1) {
+      const response = await request(app.getHttpServer())
+        .post('/v1/chat/completions')
+        .set('Authorization', `Bearer ${seeded.plaintextKey}`)
+        .send(failingPayload);
+      expect(response.status).toBe(502);
+    }
+
+    const blockedResponse = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${seeded.plaintextKey}`)
+      .send({ ...failingPayload, mockScenario: 'success', feature: 'circuit-breaker-test' });
+
+    expect(blockedResponse.status).toBe(503);
+
+    const rows = await queryAsMigrator<UsageEventRow>(
+      "SELECT status FROM usage_events WHERE tenant_id = $1 AND feature = $2 AND status = 'blocked'",
+      [seeded.tenantId, 'circuit-breaker-test'],
+    );
+    expect(rows).toHaveLength(1);
+  });
 });
