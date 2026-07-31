@@ -13,6 +13,7 @@ import {
 import { ApiKeyGuard, type AuthenticatedRequest } from '../auth/api-key.guard';
 import { TenantContextInterceptor } from '../auth/tenant-context.interceptor';
 import { recordUsageEvent } from '../metering/metering.repository';
+import { circuitKey, gatewayCircuitBreaker } from './circuit-breaker';
 import { calculateCostUsdMicros } from '../pricing/pricing.service';
 import { resolvePricing } from '../pricing/pricing.repository';
 import { getProviderCredential } from '../provider-credentials/provider-credentials.repository';
@@ -50,6 +51,30 @@ export class GatewayController {
       }
     }
 
+    const breakerKey = circuitKey(body.provider, body.model);
+    if (!gatewayCircuitBreaker.canProceed(breakerKey)) {
+      await recordUsageEvent({
+        apiKeyId: request.apiKeyId as string,
+        provider: body.provider,
+        model: body.model,
+        feature: body.feature ?? null,
+        agentRunId: body.agentRunId ?? null,
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: 0,
+        costUsdMicros: null,
+        pricingUnresolved: true,
+        status: 'blocked',
+        errorCode: 'circuit_open',
+        terminatedReason: null,
+        idempotencyKey,
+      });
+      throw new HttpException(
+        `Circuit open for ${body.provider}/${body.model} after repeated failures`,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
     const credential = await getProviderCredential(body.provider);
     if (!credential) {
       throw new BadRequestException(`No ${body.provider} credential configured for this tenant`);
@@ -82,10 +107,14 @@ export class GatewayController {
       }
     } catch (error) {
       const latencyMs = Date.now() - startedAt;
+      if (this.shouldTripBreaker(error)) {
+        gatewayCircuitBreaker.recordFailure(breakerKey);
+      }
       await this.recordFailure(error, body, request, idempotencyKey, latencyMs);
       throw this.mapProviderError(error);
     }
 
+    gatewayCircuitBreaker.recordSuccess(breakerKey);
     const latencyMs = Date.now() - startedAt;
     const pricing = await resolvePricing(body.provider, body.model, new Date());
     const costUsdMicros = pricing ? calculateCostUsdMicros(inputTokens, outputTokens, pricing) : null;
@@ -186,6 +215,14 @@ export class GatewayController {
       terminatedReason: null,
       idempotencyKey,
     });
+  }
+
+  // Rate limits and mid-stream cutoffs aren't provider-health signals —
+  // a 429 means "you're sending too much," and a cutoff was already
+  // billed as a (partial) success — so neither should trip the breaker.
+  // Timeouts, malformed responses, and anything unexpected do.
+  private shouldTripBreaker(error: unknown): boolean {
+    return !(error instanceof ProviderRateLimitedError) && !(error instanceof ProviderStreamCutoffError);
   }
 
   private errorCode(error: unknown): string {
