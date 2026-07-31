@@ -11,16 +11,21 @@ export interface SeededTenant {
 // Uses MIGRATIONS_DATABASE_URL directly (bypasses RLS) because test
 // fixtures need to create a tenant before any tenant context exists —
 // the same bootstrapping problem the production seed script solves.
-export async function seedTenant(): Promise<SeededTenant> {
+export interface SeedTenantOptions {
+  rateLimitPerMinute?: number;
+  rateLimitBurst?: number;
+}
+
+export async function seedTenant(options: SeedTenantOptions = {}): Promise<SeededTenant> {
   const client = new Client({ connectionString: process.env['MIGRATIONS_DATABASE_URL'] });
   await client.connect();
 
   try {
     const planResult = await client.query<{ id: string }>(
       `INSERT INTO plans (name, monthly_budget_usd_micros, rate_limit_per_minute, rate_limit_burst)
-       VALUES ($1, 10000000000, 60, 20)
+       VALUES ($1, 10000000000, $2, $3)
        RETURNING id`,
-      [`test-plan-${crypto.randomUUID()}`],
+      [`test-plan-${crypto.randomUUID()}`, options.rateLimitPerMinute ?? 60, options.rateLimitBurst ?? 20],
     );
 
     const tenantResult = await client.query<{ id: string }>(

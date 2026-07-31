@@ -204,4 +204,39 @@ describe('gateway proxy (integration)', () => {
     );
     expect(rows).toHaveLength(1);
   });
+
+  it('rate-limits a tenant whose plan has an exhausted burst', async () => {
+    // A dedicated tenant with a burst of 1 and near-zero refill, so the
+    // very next request within the test is guaranteed to be blocked
+    // regardless of how fast the test runner executes.
+    const limited = await seedTenant({ rateLimitPerMinute: 1, rateLimitBurst: 1 });
+    await runWithTenantContext(limited.tenantId, async () => {
+      await storeProviderCredential('openai', 'sk-test-not-a-real-key');
+    });
+
+    const payload = {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hello' }],
+      feature: 'rate-limit-plan-test',
+    };
+
+    const first = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${limited.plaintextKey}`)
+      .send(payload);
+    expect(first.status).toBe(200);
+
+    const second = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${limited.plaintextKey}`)
+      .send(payload);
+    expect(second.status).toBe(429);
+
+    const rows = await queryAsMigrator<UsageEventRow>(
+      "SELECT status FROM usage_events WHERE tenant_id = $1 AND feature = $2 AND status = 'blocked'",
+      [limited.tenantId, 'rate-limit-plan-test'],
+    );
+    expect(rows).toHaveLength(1);
+  });
 });
