@@ -14,6 +14,7 @@ export interface SeededTenant {
 export interface SeedTenantOptions {
   rateLimitPerMinute?: number;
   rateLimitBurst?: number;
+  monthlyBudgetUsdMicros?: number;
 }
 
 export async function seedTenant(options: SeedTenantOptions = {}): Promise<SeededTenant> {
@@ -23,9 +24,14 @@ export async function seedTenant(options: SeedTenantOptions = {}): Promise<Seede
   try {
     const planResult = await client.query<{ id: string }>(
       `INSERT INTO plans (name, monthly_budget_usd_micros, rate_limit_per_minute, rate_limit_burst)
-       VALUES ($1, 10000000000, $2, $3)
+       VALUES ($1, $2, $3, $4)
        RETURNING id`,
-      [`test-plan-${crypto.randomUUID()}`, options.rateLimitPerMinute ?? 60, options.rateLimitBurst ?? 20],
+      [
+        `test-plan-${crypto.randomUUID()}`,
+        options.monthlyBudgetUsdMicros ?? 10_000_000_000,
+        options.rateLimitPerMinute ?? 60,
+        options.rateLimitBurst ?? 20,
+      ],
     );
 
     const tenantResult = await client.query<{ id: string }>(
