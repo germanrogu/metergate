@@ -27,15 +27,37 @@ budgets in real time, and bills usage through Stripe's metered billing API
 ## Scope decisions (why some things are deliberately not built)
 
 - **BYOK only.** Tenants bring their own OpenAI/Anthropic API key
-  (encrypted at rest). The gateway never holds provider credit on their
-  behalf. A `credential_source` column on `provider_credentials` reserves
-  the future "platform pays" model, but only `'tenant'` is implemented.
+  (encrypted at rest, AES-256-GCM). The gateway never holds provider
+  credit on their behalf. A `credential_source` column on
+  `provider_credentials` reserves the future "platform pays" model, but
+  only `'tenant'` is implemented.
 - **No response-quality evaluation (RAGAS-style).** The gateway is
   content-agnostic by design — it proxies bytes, it does not interpret
   what was asked or generated. An optional `eval_run_id` in call metadata
   is the integration point for a separate eval project, kept decoupled.
 - **No admin back-office UI.** Tenants/plans are seeded via migration or
-  script, not a CRUD screen.
+  script (`npm run seed`), not a CRUD screen — the only way to create a
+  tenant at all, since that's not exposed through the tenant-scoped API.
+- **No streaming (SSE) yet.** The proxy is non-streaming; the reliability
+  work for partial delivery (mid-stream cutoff billing, estimated token
+  counts when the provider never sends final usage) is built ahead of it
+  so streaming can land as a proxy-mechanics change, not a billing-logic
+  rewrite.
+- **No live Stripe account.** Colombia isn't a supported Stripe account
+  country — the client, webhook signature verification, and invoice
+  mirror are built and tested against Stripe's documented API contracts
+  (mocked `fetch`, self-generated webhook signatures) rather than a live
+  sandbox. Swapping in real test-mode credentials requires no code
+  changes.
+- **No scheduled trigger for the usage-billing job.** `reportTenantUsage()`
+  reports one tenant's unbilled usage; enumerating all tenants with a
+  configured Stripe customer to drive this on a cron is a platform-level
+  operation, same bucket as tenant creation — not built.
+- **In-memory, single-instance circuit breaker and rate limiter aren't
+  shared across multiple gateway instances.** A horizontally-scaled
+  deployment would need the circuit breaker's state in Redis (atomic
+  transitions via a Lua script); the token-bucket rate limiter already is
+  Redis-backed and would scale as-is.
 - **No Kubernetes.** Docker Compose is the full local story; a simple
   Render/Fly deploy is enough for a public demo URL.
 
@@ -46,6 +68,21 @@ apps/api/     NestJS — the gateway, metering, billing, dashboard API
 apps/web/     Next.js — the dashboard
 packages/shared/  zod schemas shared between api and web
 ```
+
+Inside `apps/api/src/`:
+
+| Module | Responsibility |
+|---|---|
+| `auth/` | Gateway API key guard, tenant context interceptor, `/whoami` |
+| `api-keys/` | Key generation/hashing, tenant-facing create/list/revoke/rotate |
+| `provider-credentials/` | BYOK encryption + per-tenant credential storage |
+| `providers/` | `ProviderAdapter` interface, mock/OpenAI/Anthropic adapters, factory |
+| `pricing/` | Versioned model pricing resolution + cost calculation |
+| `metering/` | `usage_events` persistence |
+| `budgets/` | Redis token-bucket rate limiter, budget reserve/reconcile |
+| `gateway/` | The proxy endpoint itself — wires everything above together, plus the circuit breaker and idempotency cache |
+| `billing/` | Stripe client, webhook signature verification + handler, invoice mirror, usage-billing job |
+| `metrics/` | Prometheus `/metrics` |
 
 ## Commands
 
@@ -73,6 +110,18 @@ The proxy call to the LLM provider itself never happens inside an open
 Postgres transaction — it can take 30-60s under streaming. The
 transaction that persists a `usage_event` and reconciles budget state
 opens only after the provider call finishes (or is cut short).
+
+**Recurring pattern: resolving an identity before any tenant context
+exists.** Two places in this codebase have to look something up *before*
+they know which tenant they're dealing with — authenticating a gateway
+API key (`resolve_gateway_api_key`), and mapping a Stripe webhook's
+customer id back to a tenant (`resolve_tenant_by_stripe_customer_id`).
+Both go through a narrowly-scoped `SECURITY DEFINER` Postgres function
+(owned by the migrator role, callable by `metergate_app`) that returns
+only the specific fields needed for that lookup — never a general RLS
+bypass. Once the tenant id is known, everything downstream goes through
+the normal `runWithTenantContext` + `withTenantTransaction` path like any
+other tenant-scoped operation.
 
 ## Known gotcha: `next build` under the bind-mounted dev container
 
