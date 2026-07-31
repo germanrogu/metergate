@@ -6,5 +6,6 @@ import { WhoamiController } from './whoami.controller';
 @Module({
   controllers: [WhoamiController],
   providers: [ApiKeyGuard, TenantContextInterceptor],
+  exports: [ApiKeyGuard, TenantContextInterceptor],
 })
 export class AuthModule {}

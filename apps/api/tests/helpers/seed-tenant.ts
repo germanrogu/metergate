@@ -67,3 +67,17 @@ export async function revokeApiKey(apiKeyId: string): Promise<void> {
     await client.end();
   }
 }
+
+// Bypasses RLS on purpose, same as the rest of this file — for
+// asserting what actually landed in a tenant-scoped table from a test,
+// without needing to fake a tenant context just to read it back.
+export async function queryAsMigrator<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  const client = new Client({ connectionString: process.env['MIGRATIONS_DATABASE_URL'] });
+  await client.connect();
+  try {
+    const result = await client.query(sql, params);
+    return result.rows as T[];
+  } finally {
+    await client.end();
+  }
+}
