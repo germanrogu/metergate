@@ -20,4 +20,7 @@ export interface GatewayCompletionResponseBody {
   outputTokens: number;
   costUsdMicros: number | null;
   latencyMs: number;
+  // Present and true only when this response was served from the
+  // idempotency cache instead of calling the provider again.
+  replayed?: boolean;
 }
