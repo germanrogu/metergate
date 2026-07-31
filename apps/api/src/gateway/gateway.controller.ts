@@ -28,6 +28,7 @@ import {
 } from '../providers/provider-adapter';
 import { circuitKey, gatewayCircuitBreaker } from './circuit-breaker';
 import { estimateTokens } from './estimate-tokens';
+import { recordCircuitBreakerState, recordGatewayRequest } from '../metrics/metrics';
 import type { GatewayCompletionRequestBody, GatewayCompletionResponseBody } from './gateway.dto';
 import { getIdempotentResponse, storeIdempotentResponse } from './idempotency-cache';
 
@@ -93,7 +94,9 @@ export class GatewayController {
     }
 
     const breakerKey = circuitKey(body.provider, body.model);
-    if (!gatewayCircuitBreaker.canProceed(breakerKey)) {
+    const canProceed = gatewayCircuitBreaker.canProceed(breakerKey);
+    recordCircuitBreakerState(body.provider, body.model, gatewayCircuitBreaker.getState(breakerKey));
+    if (!canProceed) {
       await this.recordBlocked(body, request, idempotencyKey, 'circuit_open');
       await this.refundReservation(request.tenantId as string, reservedCostUsdMicros);
       throw new HttpException(
@@ -137,14 +140,17 @@ export class GatewayController {
       const latencyMs = Date.now() - startedAt;
       if (this.shouldTripBreaker(error)) {
         gatewayCircuitBreaker.recordFailure(breakerKey);
+        recordCircuitBreakerState(body.provider, body.model, gatewayCircuitBreaker.getState(breakerKey));
       }
       await this.recordFailure(error, body, request, idempotencyKey, latencyMs, reservedCostUsdMicros);
       throw this.mapProviderError(error);
     }
 
     gatewayCircuitBreaker.recordSuccess(breakerKey);
+    recordCircuitBreakerState(body.provider, body.model, gatewayCircuitBreaker.getState(breakerKey));
     const latencyMs = Date.now() - startedAt;
     const costUsdMicros = pricing ? calculateCostUsdMicros(inputTokens, outputTokens, pricing) : null;
+    recordGatewayRequest(body.provider, body.model, 'success', latencyMs);
 
     if (reservedCostUsdMicros !== null && costUsdMicros !== null) {
       await reconcileBudget(request.tenantId as string, reservedCostUsdMicros, costUsdMicros);
@@ -203,6 +209,7 @@ export class GatewayController {
     idempotencyKey: string | null,
     errorCode: string,
   ): Promise<void> {
+    recordGatewayRequest(body.provider, body.model, 'blocked', 0);
     await recordUsageEvent({
       apiKeyId: request.apiKeyId as string,
       provider: body.provider,
@@ -242,6 +249,7 @@ export class GatewayController {
     reservedCostUsdMicros: number | null,
   ): Promise<void> {
     if (error instanceof ProviderStreamCutoffError) {
+      recordGatewayRequest(body.provider, body.model, 'success', latencyMs);
       const pricing = await resolvePricing(body.provider, body.model, new Date());
       const outputTokens = error.deliveredOutputTokens;
       const inputTokens = estimateTokens(body.messages.map((message) => message.content).join(' '));
@@ -270,6 +278,7 @@ export class GatewayController {
       return;
     }
 
+    recordGatewayRequest(body.provider, body.model, 'error', latencyMs);
     await this.refundReservation(request.tenantId as string, reservedCostUsdMicros);
 
     await recordUsageEvent({
