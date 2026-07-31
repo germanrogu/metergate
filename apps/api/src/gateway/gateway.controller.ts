@@ -13,6 +13,8 @@ import {
 import { ApiKeyGuard, type AuthenticatedRequest } from '../auth/api-key.guard';
 import { TenantContextInterceptor } from '../auth/tenant-context.interceptor';
 import { recordUsageEvent } from '../metering/metering.repository';
+import { getTenantPlanLimits } from '../budgets/plan-limits.repository';
+import { consumeRateLimitToken } from '../budgets/rate-limiter';
 import { circuitKey, gatewayCircuitBreaker } from './circuit-breaker';
 import { calculateCostUsdMicros } from '../pricing/pricing.service';
 import { resolvePricing } from '../pricing/pricing.repository';
@@ -48,6 +50,33 @@ export class GatewayController {
       const cached = await getIdempotentResponse(request.tenantId as string, idempotencyKey);
       if (cached) {
         return { ...cached, replayed: true };
+      }
+    }
+
+    const planLimits = await getTenantPlanLimits();
+    if (planLimits) {
+      const withinLimit = await consumeRateLimitToken(request.apiKeyId as string, {
+        capacity: planLimits.rateLimitBurst,
+        refillPerSecond: planLimits.rateLimitPerMinute / 60,
+      });
+      if (!withinLimit) {
+        await recordUsageEvent({
+          apiKeyId: request.apiKeyId as string,
+          provider: body.provider,
+          model: body.model,
+          feature: body.feature ?? null,
+          agentRunId: body.agentRunId ?? null,
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: 0,
+          costUsdMicros: null,
+          pricingUnresolved: true,
+          status: 'blocked',
+          errorCode: 'rate_limited',
+          terminatedReason: null,
+          idempotencyKey,
+        });
+        throw new HttpException('Rate limit exceeded for this API key', HttpStatus.TOO_MANY_REQUESTS);
       }
     }
 
