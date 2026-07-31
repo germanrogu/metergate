@@ -11,6 +11,9 @@ env:
   MIGRATIONS_DATABASE_URL: postgres://metergate_migrator:metergate_migrator@localhost:5432/metergate
   REDIS_URL: redis://localhost:6379
   LLM_MODE: mock
+  # CI-only value, not a real secret — every run generates fresh
+  # ciphertext, nothing persists past the job.
+  PROVIDER_CREDENTIALS_ENCRYPTION_KEY: 'Gv0ixqFkvBMzrT8YbbDtapmuJWzzNxxLRzIh4dOwPzo='
 
 jobs:
   build-and-test:
