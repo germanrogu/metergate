@@ -6,6 +6,7 @@ import { AppModule } from '../../src/app.module';
 import { getPool } from '../../src/db/pool';
 import { runWithTenantContext } from '../../src/middleware/tenant-context';
 import { storeProviderCredential } from '../../src/provider-credentials/provider-credentials.repository';
+import { closeRedisClient } from '../../src/redis/redis-client';
 import { queryAsMigrator, seedTenant, type SeededTenant } from '../helpers/seed-tenant';
 
 interface UsageEventRow {
@@ -35,6 +36,7 @@ describe('gateway proxy (integration)', () => {
   afterAll(async () => {
     await app.close();
     await getPool().end();
+    await closeRedisClient();
   });
 
   it('rejects a request for a provider with no configured credential', async () => {
@@ -126,5 +128,46 @@ describe('gateway proxy (integration)', () => {
     expect(rows[0]?.status).toBe('success');
     expect(rows[0]?.output_tokens).toBeGreaterThan(0);
     expect(Number(rows[0]?.cost_usd_micros)).toBeGreaterThan(0);
+  });
+
+  it('replays a cached response for a repeated idempotency key instead of calling the provider again', async () => {
+    const idempotencyKey = `idem-${Math.random().toString(36).slice(2)}`;
+    const payload = {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hello idempotent world' }],
+      feature: 'idempotency-test',
+    };
+
+    const first = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${seeded.plaintextKey}`)
+      .set('Idempotency-Key', idempotencyKey)
+      .send(payload);
+
+    expect(first.status).toBe(200);
+    expect(first.body.replayed).toBeUndefined();
+
+    const second = await request(app.getHttpServer())
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${seeded.plaintextKey}`)
+      .set('Idempotency-Key', idempotencyKey)
+      .send(payload);
+
+    expect(second.status).toBe(200);
+    expect(second.body.replayed).toBe(true);
+    expect(second.body).toMatchObject({
+      content: first.body.content,
+      inputTokens: first.body.inputTokens,
+      outputTokens: first.body.outputTokens,
+      costUsdMicros: first.body.costUsdMicros,
+      latencyMs: first.body.latencyMs,
+    });
+
+    const rows = await queryAsMigrator<UsageEventRow>(
+      'SELECT id FROM usage_events WHERE tenant_id = $1 AND feature = $2',
+      [seeded.tenantId, 'idempotency-test'],
+    );
+    expect(rows).toHaveLength(1);
   });
 });

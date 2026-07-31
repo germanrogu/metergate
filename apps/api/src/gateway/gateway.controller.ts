@@ -25,6 +25,7 @@ import {
 } from '../providers/provider-adapter';
 import { estimateTokens } from './estimate-tokens';
 import type { GatewayCompletionRequestBody, GatewayCompletionResponseBody } from './gateway.dto';
+import { getIdempotentResponse, storeIdempotentResponse } from './idempotency-cache';
 
 const SUPPORTED_PROVIDERS = ['openai', 'anthropic'] as const;
 
@@ -40,6 +41,15 @@ export class GatewayController {
   ): Promise<GatewayCompletionResponseBody> {
     this.validateRequest(body);
 
+    const idempotencyKey = (request.headers['idempotency-key'] as string | undefined) ?? null;
+
+    if (idempotencyKey) {
+      const cached = await getIdempotentResponse(request.tenantId as string, idempotencyKey);
+      if (cached) {
+        return { ...cached, replayed: true };
+      }
+    }
+
     const credential = await getProviderCredential(body.provider);
     if (!credential) {
       throw new BadRequestException(`No ${body.provider} credential configured for this tenant`);
@@ -51,7 +61,6 @@ export class GatewayController {
       mockScenario: body.mockScenario,
     });
 
-    const idempotencyKey = (request.headers['idempotency-key'] as string | undefined) ?? null;
     const startedAt = Date.now();
     const contentParts: string[] = [];
     let inputTokens = 0;
@@ -98,13 +107,19 @@ export class GatewayController {
       idempotencyKey,
     });
 
-    return {
+    const response: GatewayCompletionResponseBody = {
       content: contentParts.join(''),
       inputTokens,
       outputTokens,
       costUsdMicros,
       latencyMs,
     };
+
+    if (idempotencyKey) {
+      await storeIdempotentResponse(request.tenantId as string, idempotencyKey, response);
+    }
+
+    return response;
   }
 
   private validateRequest(body: GatewayCompletionRequestBody): void {
