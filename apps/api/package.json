@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "migrate:up": "node-pg-migrate up -m src/db/migrations --database-url-var MIGRATIONS_DATABASE_URL",
-    "migrate:down": "node-pg-migrate down -m src/db/migrations --database-url-var MIGRATIONS_DATABASE_URL"
+    "migrate:down": "node-pg-migrate down -m src/db/migrations --database-url-var MIGRATIONS_DATABASE_URL",
+    "seed": "ts-node -T src/db/seed.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.0",
@@ -33,9 +34,11 @@
     "@typescript-eslint/eslint-plugin": "^8.3.0",
     "@typescript-eslint/parser": "^8.3.0",
     "eslint": "^9.9.0",
+    "@types/express": "^4.17.21",
     "@types/supertest": "^6.0.2",
     "node-pg-migrate": "^7.6.1",
     "supertest": "^7.0.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"
   }
