@@ -24,7 +24,11 @@ export class ApiKeyGuard implements CanActivate {
     const plaintext = header.slice(BEARER_PREFIX.length).trim();
     const resolved = await resolveApiKeyByHash(hashApiKey(plaintext));
 
-    if (!resolved || resolved.revokedAt) {
+    // revokedAt can be scheduled in the future (see key rotation's grace
+    // period) — only a revocation that has actually taken effect blocks
+    // the request; a future one still authenticates until it elapses.
+    const isRevoked = resolved?.revokedAt && resolved.revokedAt <= new Date();
+    if (!resolved || isRevoked) {
       throw new UnauthorizedException('Invalid or revoked API key');
     }
 
